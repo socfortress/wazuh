@@ -242,6 +242,7 @@ class MasterHandler(server.AbstractServerHandler, c_common.WazuhCommon):
         self.task_loggers = {}
         context_tag.set(self.tag)
         self.integrity = None
+        self.agent_groups = None
         # Maximum zip size allowed when syncing Integrity files.
         self.current_zip_limit = self.cluster_items['intervals']['communication']['max_zip_size']
 
@@ -433,8 +434,13 @@ class MasterHandler(server.AbstractServerHandler, c_common.WazuhCommon):
 
         # SyncFiles instance used to zip and send integrity files to worker.
         self.integrity = c_common.SyncFiles(cmd=b'syn_m_c', logger=self.task_loggers['Integrity sync'], manager=self)
-        # Initialize agent-groups sending task.
-        self.agent_group_task = asyncio.ensure_future(self.send_agent_groups_information())
+
+        # SyncWazuhdb instance to send agent-groups data to the worker.
+        wdb_conn = WazuhDBConnection()
+        self.agent_groups = c_common.SyncWazuhdb(manager=self, logger=self.task_loggers['Agent-groups send'],
+                                                 cmd=b'syn_g_m_w', data_retriever=wdb_conn.run_wdb_command,
+                                                 set_data_command='global set-agent-groups',
+                                                 set_payload={'mode': 'override', 'sync_status': 'synced'})
 
         return cmd, payload
 
@@ -708,29 +714,19 @@ class MasterHandler(server.AbstractServerHandler, c_common.WazuhCommon):
 
         return b'ok', b'Sent'
 
-    async def send_agent_groups_information(self):
+    async def send_agent_groups_information(self, groups_info):
         """Function in charge of sending the group information to the worker node.
         Each time we get data it will be sent.
         A worker node cannot send two consecutive times the same group information.
         """
         logger = self.task_loggers['Agent-groups send']
-        wdb_conn = WazuhDBConnection()
-        sync_object = c_common.SyncWazuhdb(manager=self, logger=logger, cmd=b'syn_g_m_w',
-                                           data_retriever=wdb_conn.run_wdb_command,
-                                           set_data_command='global set-agent-groups',
-                                           set_payload={'mode': 'override', 'sync_status': 'synced'})
 
-        while True:
-            info = self.server.get_agent_groups_info(self.name)
-            if info != {}:
-                try:
-                    logger.info("Starting.")
-                    self.send_agent_groups_status['date_start'] = get_utc_now().timestamp()
-                    await sync_object.sync(start_time=self.send_agent_groups_status['date_start'], chunks=info)
-                except Exception as e:
-                    logger.error(f'Error sending agent-groups information to {self.name}: {e}')
-
-            await asyncio.sleep(1)
+        try:
+            logger.info("Starting.")
+            self.send_agent_groups_status['date_start'] = get_utc_now().timestamp()
+            await self.agent_groups.sync(start_time=self.send_agent_groups_status['date_start'], chunks=groups_info)
+        except Exception as e:
+            logger.error(f'Error sending agent-groups information to {self.name}: {e}')
 
     def set_date_end_master(self, logger):
         """Store the datetime when Integrity sync is completed and log 'Finished in' message.
@@ -1033,8 +1029,6 @@ class Master(server.AbstractServer):
             Arguments for the parent class constructor.
         """
         super().__init__(**kwargs, tag="Master")
-        self.agent_groups_control = {}
-        self.agent_groups_control_workers = set()
         self.integrity_control = {}
         self.handler_class = MasterHandler
         try:
@@ -1067,29 +1061,6 @@ class Master(server.AbstractServer):
         return {'info': {'name': self.configuration['node_name'], 'type': self.configuration['node_type'],
                          'version': metadata.__version__, 'ip': self.configuration['nodes'][0]}}
 
-    def get_agent_groups_info(self, client):
-        """Check whether the updated group information is sent only once per worker.
-
-        The variable with this information will not be updated until all the MasterHandlers send
-        the information to their worker node.
-
-        Parameters
-        ----------
-        client : str
-            String with the node name.
-
-        Returns
-        -------
-        result : dict
-            Updated data on agent-groups.
-        """
-        result = {}
-        if client in self.clients.keys() and client not in self.agent_groups_control_workers:
-            result = self.agent_groups_control
-            self.agent_groups_control_workers.add(client)
-
-        return result
-
     async def agent_groups_update(self):
         """Asynchronous task in charge of obtaining data related to agent-groups periodically.
 
@@ -1118,9 +1089,9 @@ class Master(server.AbstractServer):
             try:
                 before = perf_counter()
                 sync_object.logger.info("Starting.")
-                if len(self.agent_groups_control_workers) >= len(self.clients.keys()) > 0:
-                    self.agent_groups_control = await sync_object.retrieve_information()
-                    self.agent_groups_control_workers.clear()
+                if len(self.clients.keys()) > 0:
+                    if groups_info := await sync_object.retrieve_information():
+                        self.broadcast(MasterHandler.send_agent_groups_information, groups_info)
                     after = perf_counter()
                     logger.info(f"Finished in {(after - before):.3f}s.")
                 elif len(self.clients.keys()) == 0:
