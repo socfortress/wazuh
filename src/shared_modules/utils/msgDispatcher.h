@@ -15,6 +15,7 @@
 #include <mutex>
 #include <functional>
 #include <utility>
+#include "commonDefs.h"
 #include "threadDispatcher.h"
 
 namespace Utils
@@ -32,17 +33,29 @@ namespace Utils
         , public RawValueDecoder
     {
         public:
-            MsgDispatcher()
-                : ThreadType{std::bind(&DispatcherType::dispatch, this, std::placeholders::_1)}
+            MsgDispatcher(const size_t maxQueueSize = UNLIMITED_QUEUE_SIZE)
+                : ThreadType
+            {
+                std::bind(&DispatcherType::dispatch, this, std::placeholders::_1),
+                std::thread::hardware_concurrency(),
+                maxQueueSize
+            }
             {
             }
             // LCOV_EXCL_START
             ~MsgDispatcher() = default;
             // LCOV_EXCL_STOP
-            void setCallback(const Key& key, const std::function<void(Value)>& callback)
+            bool addCallback(const Key& key, const std::function<void(Value)>& callback)
             {
                 std::lock_guard<std::mutex> lock{ m_mutex };
-                m_callbacks[key] = callback;
+                const auto ret{ m_callbacks.find(key) == m_callbacks.end() };
+
+                if (ret)
+                {
+                    m_callbacks[key] = callback;
+                }
+
+                return ret;
             }
             void removeCallback(const Key& key)
             {

@@ -15,9 +15,10 @@
 #include <memory>
 #include <mutex>
 #include <functional>
-#include <shared_mutex>
+#include <memory>
 #include "commonDefs.h"
 #include "json.hpp"
+#include "registrationController.hpp"
 #include "msgDispatcher.h"
 #include "syncDecoder.h"
 #include "dbsyncWrapper.h"
@@ -86,7 +87,7 @@ namespace RSync
 
             void releaseContext(const RSYNC_HANDLE handle);
 
-            RSYNC_HANDLE create();
+            RSYNC_HANDLE create(const size_t maxQueueSize = UNLIMITED_QUEUE_SIZE);
 
             void startRSync(const RSYNC_HANDLE handle,
                             const std::shared_ptr<DBSyncWrapper>& spDBSyncWrapper,
@@ -102,14 +103,18 @@ namespace RSync
             void push(const RSYNC_HANDLE handle,
                       const std::vector<unsigned char>& data);
 
+            bool isComponentRegistered(const std::string& component);
+
 
         private:
 
             class RSyncContext final
             {
                 public:
-                    RSyncContext() = default;
-                    MsgDispatcher m_msgDispatcher;
+                    RSyncContext(const size_t maxQueueSize)
+                        : m_msgDispatcher { std::make_shared<MsgDispatcher>(maxQueueSize) }
+                    { }
+                    std::shared_ptr<MsgDispatcher> m_msgDispatcher;
             };
 
             std::shared_ptr<RSyncContext> remoteSyncContext(const RSYNC_HANDLE handle);
@@ -149,6 +154,7 @@ namespace RSync
             RSyncImplementation& operator=(const RSyncImplementation&) = delete;
             std::map<RSYNC_HANDLE, std::shared_ptr<RSyncContext>> m_remoteSyncContexts;
             std::mutex m_mutex;
+            RegistrationController m_registrationController;
     };
 }// namespace RSync
 
