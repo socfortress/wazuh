@@ -8,6 +8,7 @@
  */
 #ifdef __linux__
 #include "syscheck_audit.h"
+#include "time_op.h"
 
 #define AUDIT_LOAD_RETRIES 5 // Max retries to reload Audit rules
 
@@ -449,6 +450,12 @@ char *audit_get_id(const char *event) {
     return id;
 }
 
+void audit_key_delay() {
+    if (syscheck.rt_delay){
+        struct timeval timeout = {0, 500 * 1000};
+        select(0, NULL, NULL, NULL, &timeout);
+    }
+}
 
 void audit_parse(char *buffer) {
     static int auid_err_reported = 0;
@@ -468,6 +475,9 @@ void audit_parse(char *buffer) {
     whodata_evt *w_evt;
     unsigned int items = 0;
     audit_key_type filter_key;
+    struct timespec start;
+    struct timespec end;
+    clock_t cputime_start;
 
     // Checks if the key obtained is one of those configured to monitor
     filter_key = filterkey_audit_events(buffer);
@@ -532,6 +542,11 @@ void audit_parse(char *buffer) {
         }
         // Fallthrough
     case FIM_AUDIT_CUSTOM_KEY:
+
+        cputime_start = clock();
+        gettime(&start);
+        audit_key_delay();
+
         if (psuccess = strstr(buffer, "success=yes"), psuccess) {
 
             os_calloc(1, sizeof(whodata_evt), w_evt);
@@ -951,6 +966,12 @@ void audit_parse(char *buffer) {
             free(path1);
             free_whodata_event(w_evt);
         }
+
+        gettime(&end);
+        minfo("FIM_AUDIT_CUSTOM_KEY time: %.3f sec (%.3f clock sec)",
+            time_diff(&start, &end),
+            (double)(clock() - cputime_start) / CLOCKS_PER_SEC);
+
         break;
     case FIM_AUDIT_HC_KEY:
         if (regexec(&regexCompiled_syscall, buffer, 2, match, 0) == 0) {

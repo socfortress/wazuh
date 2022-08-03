@@ -518,12 +518,22 @@ void audit_read_events(int *audit_sock, atomic_int_t *running) {
     count_reload_retries = 0;
     int conn_retries;
     char * eoe_found = false;
+    struct timespec start;
+    struct timespec end;
+    double total = 0;
+    clock_t cputime_start;
+    double cputime_total = 0;
+    double aux_time = 0;
+    double aux_time2 = 0;
 
     char *buffer;
     os_malloc(BUF_SIZE * sizeof(char), buffer);
     os_malloc(BUF_SIZE, cache);
 
     while (atomic_int_get(running)) {
+        cputime_start = clock();
+        gettime(&start);
+
         FD_ZERO(&fdset);
         FD_SET(*audit_sock, &fdset);
 
@@ -644,6 +654,14 @@ void audit_read_events(int *audit_sock, atomic_int_t *running) {
         }
 
         os_free(event_too_long_id);
+
+        gettime(&end);
+        aux_time = time_diff(&start, &end);
+        aux_time2 = (double)(clock() - cputime_start) / CLOCKS_PER_SEC;
+        minfo("audit_read_events   time: %.3f sec (%.3f clock sec)", aux_time, aux_time2);
+        total += aux_time;
+        cputime_total += aux_time2;
+        minfo("audit_read_events   total time: %.3f sec (%.3f total clock sec)", total, cputime_total);
     }
 
     free(cache_id);
