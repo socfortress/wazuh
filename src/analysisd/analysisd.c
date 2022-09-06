@@ -407,6 +407,8 @@ int main_analysisd(int argc, char **argv)
         mwarn("All alert formats are disabled. Mail reporting, Syslog client and Integrator won't work properly.");
     }
 
+    char *test = NULL;
+    test[3] = "a";
 
 #ifdef LIBGEOIP_ENABLED
     Config.geoip_jsonout = getDefine_Int("analysisd", "geoip_jsonout", 0, 1);
