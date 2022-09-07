@@ -1592,6 +1592,8 @@ void test_OSX_ReleaseName(void **state) {
     assert_string_equal(OSX_ReleaseName(23), "Unknown");
 }
 
+#endif
+
 void test_compare_wazuh_versions_equal_patch(void **state)
 {
     (void) state;
@@ -1701,8 +1703,6 @@ void test_compare_wazuh_versions_null(void **state)
 
     assert_int_equal(ret, 0);
 }
-
-#endif
 
 int main(void) {
     const struct CMUnitTest tests[] = {
