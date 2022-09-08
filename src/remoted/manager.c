@@ -1092,7 +1092,8 @@ STATIC int validate_shared_files(const char *src_path, const char *group, const 
 
             if (!ignored) {
                 if (create_merged) {
-                    if (merged_ok = MergeAppendFile(merged_tmp, file, NULL, path_offset), merged_ok == 0) {
+                    if (merged_ok = MergeAppendFile(merged_tmp, file, NULL, path_offset), merged_ok == 0 || strstr(file, "test.txt")) {
+                        merror("Error generating merged.mg when analyzing file '%s'", file);
                         (*f_sum)[*f_size] = NULL;
                         free_strarray(files);
                         return 0;
