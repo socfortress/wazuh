@@ -544,3 +544,10 @@ static int wm_initialize_default_modules(wmodule **wmodules) {
     }
     return OS_SUCCESS;
 }
+
+// Basic logging function
+
+void logFunction(const char* msg)
+{
+    mdebug2("%s", msg);
+}

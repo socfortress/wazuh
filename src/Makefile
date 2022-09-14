@@ -1187,7 +1187,7 @@ endif
 else
 ifneq (,$(filter ${uname_S},SunOS AIX))
 	cpu_arch := ${uname_P}
-ifeq (${cpu_arch},powerpc)  
+ifeq (${cpu_arch},powerpc)
 	PRECOMPILED_ARCH := /powerpc
 else
 ifneq (,$(filter ${cpu_arch},sparc sun4u))
@@ -2146,7 +2146,7 @@ endif
 endif
 
 wazuh-modulesd: ${wmodulesd_o}
-	${OSSEC_CCBIN} ${OSSEC_LDFLAGS} $^ ${OSSEC_LIBS} ${MODULESD_LDFLAGS} -o $@
+	${OSSEC_CCBIN} ${OSSEC_LDFLAGS} $^ ${OSSEC_LIBS} ${RSYNC_LIB} ${MODULESD_LDFLAGS} -o $@
 
 ### wazuh-gtest-gmock ###
 

@@ -202,4 +202,7 @@ size_t wmcom_dispatch(char * command, char ** output);
 size_t wmcom_getconfig(const char * section, char ** output);
 int wmcom_sync(char * buffer);
 
+// Basic logging function
+void logFunction(const char* msg);
+
 #endif // W_MODULES
