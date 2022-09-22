@@ -120,4 +120,6 @@ typedef struct
  */
 typedef void((*log_fnc_t)(const char* msg));
 
+typedef void ((*full_log_fnc_t)(const char *log_type, const char *tag, const char * file, int line, const char * func, const char *msg, ...));
+
 #endif // _COMMON_DEFS_H_
