@@ -29,7 +29,6 @@
 
 import argparse
 import configparser
-import signal
 import socket
 import sqlite3
 import sys
@@ -84,6 +83,13 @@ THROTTLING_EXCEPTION_ERROR_MESSAGE = "The '{name}' request was denied due to req
                                      f"'{RETRY_CONFIGURATION_URL}'"
 
 
+MESSAGE_HEADER = "1:Wazuh-AWS:"
+DEFAULT_GOV_REGIONS = {'us-gov-east-1', 'us-gov-west-1'}
+DEPRECATED_TABLES = {'log_progress', 'trail_progress'}
+SERVICES_REQUIRING_REGION = {'inspector',  'cloudwatch'}
+
+WAZUH_DEFAULT_RETRY_CONFIGURATION = {'max_attempts': 10, 'mode': 'standard'}
+
 ################################################################################
 # Classes
 ################################################################################
@@ -104,7 +110,8 @@ class WazuhIntegration:
 
     def __init__(self, access_key, secret_key, aws_profile, iam_role_arn,
                  service_name=None, region=None, bucket=None, discard_field=None,
-                 discard_regex=None, sts_endpoint=None, service_endpoint=None, iam_role_duration=None):
+                 discard_regex=None, sts_endpoint=None, service_endpoint=None, iam_role_duration=None,
+                 db_name=None):
         # SQL queries
         self.sql_find_table_names = """
             SELECT
@@ -163,29 +170,23 @@ class WazuhIntegration:
 
         self.wazuh_path = utils.find_wazuh_path()
         self.wazuh_version = utils.get_wazuh_version()
-        self.wazuh_queue = '{0}/queue/sockets/queue'.format(self.wazuh_path)
-        self.wazuh_wodle = '{0}/wodles/aws'.format(self.wazuh_path)
-        self.msg_header = "1:Wazuh-AWS:"
-        # GovCloud regions
-        self.gov_regions = {'us-gov-east-1', 'us-gov-west-1'}
+        self.wazuh_queue = f'{self.wazuh_path}/queue/sockets/queue'
+        self.wazuh_wodle = f'{self.wazuh_path}/wodles/aws'
 
         self.connection_config = self.default_config()
-
         self.client = self.get_client(access_key=access_key,
                                       secret_key=secret_key,
                                       profile=aws_profile,
                                       iam_role_arn=iam_role_arn,
                                       service_name=service_name,
-                                      bucket=bucket,
                                       region=region,
                                       sts_endpoint=sts_endpoint,
                                       service_endpoint=service_endpoint,
                                       iam_role_duration=iam_role_duration
                                       )
 
-
         # db_name is an instance variable of subclass
-        self.db_path = "{0}/{1}.db".format(self.wazuh_wodle, self.db_name)
+        self.db_path = f"{self.wazuh_wodle}/{db_name}.db"
         self.db_connector = sqlite3.connect(self.db_path)
         self.db_cursor = self.db_connector.cursor()
         if bucket:
@@ -198,35 +199,34 @@ class WazuhIntegration:
 
     def check_metadata_version(self):
         try:
-            query_metadata = self.db_connector.execute(self.sql_find_table, {'name': 'metadata'})
-            metadata = True if query_metadata.fetchone() else False
-            if metadata:
-                query_version = self.db_connector.execute(self.sql_get_metadata_version)
-                metadata_version = query_version.fetchone()[0]
-                # update Wazuh version in metadata table
-                if metadata_version != self.wazuh_version:
-                    self.db_connector.execute(self.sql_update_version_metadata, {'wazuh_version': self.wazuh_version})
-                    self.db_connector.commit()
+            if self.db_cursor.execute(self.sql_find_table, {'name': 'metadata'}).fetchone():
+                # The table does not exist; update existing metadata value, if required
+                try:
+                    metadata_version = self.db_cursor.execute(self.sql_get_metadata_version).fetchone()[0]
+                    if metadata_version != self.wazuh_version:
+                        self.db_cursor.execute(self.sql_update_version_metadata, {'wazuh_version': self.wazuh_version})
+                except (sqlite3.IntegrityError, sqlite3.OperationalError, sqlite3.Error) as err:
+                    print(f'ERROR: Error attempting to update the metadata table: {err}')
+                    sys.exit(5)
             else:
-                # create metadate table
-                self.db_connector.execute(self.sql_create_metadata_table)
-                # insert wazuh version value
-                self.db_connector.execute(self.sql_insert_version_metadata, {'wazuh_version': self.wazuh_version})
-                self.db_connector.commit()
-                # delete old tables if its exist
-                self.delete_deprecated_tables()
-        except Exception as e:
-            print('ERROR: Error creating metadata table: {}'.format(e))
+                # The table does not exist; create it and insert the metadata value
+                try:
+                    self.db_cursor.execute(self.sql_create_metadata_table)
+                    self.db_cursor.execute(self.sql_insert_version_metadata, {'wazuh_version': self.wazuh_version})
+                    self.delete_deprecated_tables()
+                except (sqlite3.IntegrityError, sqlite3.OperationalError, sqlite3.Error) as err:
+                    print(f'ERROR: Error attempting to create the metadata table: {err}')
+                    sys.exit(5)
+            self.db_connector.commit()
+        except (sqlite3.IntegrityError, sqlite3.OperationalError, sqlite3.Error) as err:
+            print(f'ERROR: Error attempting to operate with the {self.db_path} database: {err}')
             sys.exit(5)
 
     def delete_deprecated_tables(self):
-        query_tables = self.db_connector.execute(self.sql_find_table_names)
-        tables = query_tables.fetchall()
-        for table in tables:
-            if 'log_progress' in table:
-                self.db_connector.execute(self.sql_drop_table.format(table='log_progress'))
-            elif 'trail_progress' in table:
-                self.db_connector.execute(self.sql_drop_table.format(table='trail_progress'))
+        tables = set([t[0] for t in self.db_cursor.execute(self.sql_find_table_names).fetchall()])
+        for table in tables.intersection(DEPRECATED_TABLES):
+            debug(f"Removing deprecated '{table} 'table from {self.db_path}", 2)
+            self.db_cursor.execute(self.sql_drop_table.format(table_name=table))
 
     @staticmethod
     def default_config():
@@ -241,16 +241,11 @@ class WazuhIntegration:
             debug(f"Generating default configuration for retries: mode {args['config'].retries['mode']} - max_attempts {args['config'].retries['max_attempts']}",2)
         else:
             debug(f'Found configuration for connection retries in {path.join(path.expanduser("~"), ".aws", "config")}',2)
-
         return args
 
-    def get_client(self, access_key, secret_key, profile, iam_role_arn, service_name,
-                   bucket, region=None,
-                   sts_endpoint=None, service_endpoint=None, iam_role_duration=None):
-
+    def get_client(self, access_key, secret_key, profile, iam_role_arn, service_name, region=None, sts_endpoint=None,
+                   service_endpoint=None, iam_role_duration=None):
         conn_args = {}
-
-
         if access_key is not None and secret_key is not None:
             print(DEPRECATED_MESSAGE.format(name="access_key and secret_key", release="4.4", url=CREDENTIALS_URL))
             conn_args['aws_access_key_id'] = access_key
@@ -260,29 +255,22 @@ class WazuhIntegration:
             conn_args['profile_name'] = profile
 
         # set region name
-        if region and service_name in ('inspector', 'cloudwatchlogs'):
+        if region and service_name in SERVICES_REQUIRING_REGION:
             conn_args['region_name'] = region
         else:
             # it is necessary to set region_name for GovCloud regions
-            conn_args['region_name'] = region if region in self.gov_regions \
-                else None
-
+            conn_args['region_name'] = region if region in DEFAULT_GOV_REGIONS else None
         boto_session = boto3.Session(**conn_args)
         service_name = "logs" if service_name == "cloudwatchlogs" else service_name
         # If using a role, create session using that
         try:
             if iam_role_arn:
-
-                sts_client = boto_session.client('sts', endpoint_url=sts_endpoint, **self.connection_config)
-
-                assume_role_kwargs = {'RoleArn': iam_role_arn,
-                                      'RoleSessionName': 'WazuhLogParsing'
-                                      }
+                sts_client = boto_session.client(service_name='sts', endpoint_url=sts_endpoint, **self.connection_config)
+                assume_role_kwargs = {'RoleArn': iam_role_arn, 'RoleSessionName': 'WazuhLogParsing'}
                 if iam_role_duration is not None:
                     assume_role_kwargs['DurationSeconds'] = iam_role_duration
 
                 sts_role_assumption = sts_client.assume_role(**assume_role_kwargs)
-
                 sts_session = boto3.Session(aws_access_key_id=sts_role_assumption['Credentials']['AccessKeyId'],
                                             aws_secret_access_key=sts_role_assumption['Credentials']['SecretAccessKey'],
                                             aws_session_token=sts_role_assumption['Credentials']['SessionToken'],
@@ -293,7 +281,6 @@ class WazuhIntegration:
             else:
                 client = boto_session.client(service_name=service_name, endpoint_url=service_endpoint,
                                              **self.connection_config)
-
         except botocore.exceptions.ClientError as e:
             print("ERROR: Access error: {}".format(e))
             sys.exit(3)
@@ -309,10 +296,8 @@ class WazuhIntegration:
             conn_args['profile_name'] = profile
 
         boto_session = boto3.Session(**conn_args)
-
         try:
             sts_client = boto_session.client(service_name='sts', **self.connection_config)
-
         except Exception as e:
             print("Error getting STS client: {}".format(e))
             sys.exit(3)
@@ -331,8 +316,7 @@ class WazuhIntegration:
             debug(json_msg, 3)
             s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
             s.connect(self.wazuh_queue)
-            s.send("{header}{msg}".format(header=self.msg_header,
-                                          msg=json_msg if dump_json else msg).encode())
+            s.send(f"{MESSAGE_HEADER}{json_msg if dump_json else msg}".encode())
             s.close()
         except socket.error as e:
             if e.errno == 111:
@@ -340,9 +324,8 @@ class WazuhIntegration:
                 sys.exit(11)
             elif e.errno == 90:
                 print("ERROR: Message too long to send to Wazuh.  Skipping message...")
-                debug(
-                    '+++ ERROR: Message longer than buffer socket for Wazuh.  Consider increasing rmem_max  Skipping message...',
-                    1)
+                debug('+++ ERROR: Message longer than buffer socket for Wazuh. Consider increasing rmem_max. '
+                      'Skipping message...', 1)
             else:
                 print("ERROR: Error sending message to wazuh: {}".format(e))
                 sys.exit(13)
@@ -356,7 +339,7 @@ class WazuhIntegration:
         """
         try:
             debug('+++ Table does not exist; create', 1)
-            self.db_connector.execute(sql_create_table)
+            self.db_cursor.execute(sql_create_table)
         except Exception as e:
             print("ERROR: Unable to create SQLite DB: {}".format(e))
             sys.exit(6)
@@ -366,7 +349,7 @@ class WazuhIntegration:
         :param sql_create_table: SQL query to create the table
         """
         try:
-            tables = set(map(operator.itemgetter(0), self.db_connector.execute(self.sql_find_table_names)))
+            tables = set(map(operator.itemgetter(0), self.db_cursor.execute(self.sql_find_table_names)))
         except Exception as e:
             print("ERROR: Unexpected error accessing SQLite DB: {}".format(e))
             sys.exit(5)
@@ -376,7 +359,7 @@ class WazuhIntegration:
 
     def close_db(self):
         self.db_connector.commit()
-        self.db_connector.execute(self.sql_db_optimize)
+        self.db_cursor.execute(self.sql_db_optimize)
         self.db_connector.close()
 
 
@@ -534,7 +517,6 @@ class AWSBucket(WazuhIntegration):
                 aws_account_id=:aws_account_id AND
                 aws_region=:aws_region;"""
 
-        self.db_name = 's3_cloudtrail'
         WazuhIntegration.__init__(self, access_key=access_key,
                                   secret_key=secret_key,
                                   aws_profile=profile,
@@ -546,7 +528,8 @@ class AWSBucket(WazuhIntegration):
                                   discard_regex=discard_regex,
                                   sts_endpoint=sts_endpoint,
                                   service_endpoint=service_endpoint,
-                                  iam_role_duration=iam_role_duration
+                                  iam_role_duration=iam_role_duration,
+                                  db_name='s3_cloudtrail'
                                   )
         self.retain_db_records = 500
         self.reparse = reparse
@@ -598,7 +581,7 @@ class AWSBucket(WazuhIntegration):
         str or None
             A str with the key of the last file processed, None if no file has been processed yet.
         """
-        query_last_key = self.db_connector.execute(
+        query_last_key = self.db_cursor.execute(
             self.sql_find_last_key_processed.format(table_name=self.db_table_name), {'bucket_path': self.bucket_path,
                                                                                      'aws_account_id': aws_account_id,
                                                                                      'prefix': f'{self.prefix}%'})
@@ -609,7 +592,7 @@ class AWSBucket(WazuhIntegration):
             return None
 
     def already_processed(self, downloaded_file, aws_account_id, aws_region):
-        cursor = self.db_connector.execute(self.sql_already_processed.format(table_name=self.db_table_name), {
+        cursor = self.db_cursor.execute(self.sql_already_processed.format(table_name=self.db_table_name), {
             'bucket_path': self.bucket_path,
             'aws_account_id': aws_account_id,
             'aws_region': aws_region,
@@ -622,7 +605,7 @@ class AWSBucket(WazuhIntegration):
     def mark_complete(self, aws_account_id, aws_region, log_file):
         if not self.reparse:
             try:
-                self.db_connector.execute(self.sql_mark_complete.format(table_name=self.db_table_name), {
+                self.db_cursor.execute(self.sql_mark_complete.format(table_name=self.db_table_name), {
                     'bucket_path': self.bucket_path,
                     'aws_account_id': aws_account_id,
                     'aws_region': aws_region,
@@ -634,14 +617,14 @@ class AWSBucket(WazuhIntegration):
     def create_table(self):
         try:
             debug('+++ Table does not exist; create', 1)
-            self.db_connector.execute(self.sql_create_table.format(table_name=self.db_table_name))
+            self.db_cursor.execute(self.sql_create_table.format(table_name=self.db_table_name))
         except Exception as e:
             print("ERROR: Unable to create SQLite DB: {}".format(e))
             sys.exit(6)
 
     def init_db(self):
         try:
-            tables = set(map(operator.itemgetter(0), self.db_connector.execute(self.sql_find_table_names)))
+            tables = set(map(operator.itemgetter(0), self.db_cursor.execute(self.sql_find_table_names)))
         except Exception as e:
             print("ERROR: Unexpected error accessing SQLite DB: {}".format(e))
             sys.exit(5)
@@ -657,7 +640,7 @@ class AWSBucket(WazuhIntegration):
         :param aws_region: str
         :rtype: int
         """
-        query_count_region = self.db_connector.execute(
+        query_count_region = self.db_cursor.execute(
             self.sql_count_region.format(table_name=self.db_table_name), {'bucket_path': self.bucket_path,
                                                                           'aws_account_id': aws_account_id,
                                                                           'aws_region': aws_region,
@@ -668,7 +651,7 @@ class AWSBucket(WazuhIntegration):
         debug("+++ DB Maintenance", 1)
         try:
             if self.db_count_region(aws_account_id, aws_region) > self.retain_db_records:
-                self.db_connector.execute(self.sql_db_maintenance.format(table_name=self.db_table_name), {
+                self.db_cursor.execute(self.sql_db_maintenance.format(table_name=self.db_table_name), {
                     'bucket_path': self.bucket_path,
                     'aws_account_id': aws_account_id,
                     'aws_region': aws_region,
@@ -790,7 +773,7 @@ class AWSBucket(WazuhIntegration):
             else:
                 filter_marker = self.marker_custom_date(aws_region, aws_account_id, self.default_date)
         else:
-            query_last_key = self.db_connector.execute(
+            query_last_key = self.db_cursor.execute(
                 self.sql_find_last_key_processed.format(table_name=self.db_table_name), {
                     'bucket_path': self.bucket_path,
                     'aws_region': aws_region,
@@ -958,7 +941,7 @@ class AWSBucket(WazuhIntegration):
         self.init_db()
         self.iter_regions_and_accounts(account_id, regions)
         self.db_connector.commit()
-        self.db_connector.execute(self.sql_db_optimize)
+        self.db_cursor.execute(self.sql_db_optimize)
         self.db_connector.close()
 
     def iter_regions_and_accounts(self, account_id, regions):
@@ -1263,7 +1246,7 @@ class AWSConfigBucket(AWSLogsBucket):
                 self.default_date.strftime('%Y%m%d')
         else:
             try:
-                query_date_last_log = self.db_connector.execute(
+                query_date_last_log = self.db_cursor.execute(
                     self.sql_find_last_log_processed.format(table_name=self.db_table_name), {
                         'bucket_path': self.bucket_path,
                         'aws_account_id': aws_account_id,
@@ -1393,7 +1376,7 @@ class AWSConfigBucket(AWSLogsBucket):
                                                     datetime.strptime(date, self.date_format))
         else:
             created_date = self._format_created_date(date)
-            query_last_key_of_day = self.db_connector.execute(
+            query_last_key_of_day = self.db_cursor.execute(
                 self.sql_find_last_key_processed_of_day.format(table_name=self.db_table_name), {
                     'bucket_path': self.bucket_path,
                     'aws_account_id': aws_account_id,
@@ -1752,7 +1735,7 @@ class AWSVPCFlowBucket(AWSLogsBucket):
         return flow_logs_ids
 
     def already_processed(self, downloaded_file, aws_account_id, aws_region, flow_log_id):
-        cursor = self.db_connector.execute(self.sql_already_processed.format(table_name=self.db_table_name), {
+        cursor = self.db_cursor.execute(self.sql_already_processed.format(table_name=self.db_table_name), {
             'bucket_path': self.bucket_path,
             'aws_account_id': aws_account_id,
             'aws_region': aws_region,
@@ -1777,7 +1760,7 @@ class AWSVPCFlowBucket(AWSLogsBucket):
 
         if not last_date_processed:
             try:
-                query_date_last_log = self.db_connector.execute(
+                query_date_last_log = self.db_cursor.execute(
                     self.sql_get_date_last_log_processed.format(table_name=self.db_table_name), {
                         'bucket_path': self.bucket_path,
                         'aws_account_id': aws_account_id,
@@ -1829,7 +1812,7 @@ class AWSVPCFlowBucket(AWSLogsBucket):
         :type flow_log_id: str
         :rtype: int
         """
-        query_count_region = self.db_connector.execute(
+        query_count_region = self.db_cursor.execute(
             self.sql_count_region.format(table_name=self.db_table_name), {
                 'bucket_path': self.bucket_path,
                 'aws_account_id': aws_account_id,
@@ -1842,7 +1825,7 @@ class AWSVPCFlowBucket(AWSLogsBucket):
         debug("+++ DB Maintenance", 1)
         try:
             if self.db_count_region(aws_account_id, aws_region, flow_log_id) > self.retain_db_records:
-                self.db_connector.execute(self.sql_db_maintenance.format(table_name=self.db_table_name), {
+                self.db_cursor.execute(self.sql_db_maintenance.format(table_name=self.db_table_name), {
                     'bucket_path': self.bucket_path,
                     'aws_account_id': aws_account_id,
                     'aws_region': aws_region,
@@ -1861,7 +1844,7 @@ class AWSVPCFlowBucket(AWSLogsBucket):
             filter_marker = self.marker_custom_date(aws_region, aws_account_id,
                                                     datetime.strptime(date, self.date_format))
         else:
-            query_last_key_of_day = self.db_connector.execute(
+            query_last_key_of_day = self.db_cursor.execute(
                 self.sql_find_last_key_processed_of_day.format(table_name=self.db_table_name), {
                     'bucket_path': self.bucket_path,
                     'aws_account_id': aws_account_id,
@@ -1984,7 +1967,7 @@ class AWSVPCFlowBucket(AWSLogsBucket):
                     2)
         else:
             try:
-                self.db_connector.execute(self.sql_mark_complete.format(table_name=self.db_table_name), {
+                self.db_cursor.execute(self.sql_mark_complete.format(table_name=self.db_table_name), {
                     'bucket_path': self.bucket_path,
                     'aws_account_id': aws_account_id,
                     'aws_region': aws_region,
@@ -2193,7 +2176,7 @@ class AWSCustomBucket(AWSBucket):
         self.db_maintenance()
 
     def already_processed(self, downloaded_file, aws_account_id, aws_region):
-        cursor = self.db_connector.execute(self.sql_already_processed.format(table_name=self.db_table_name), {
+        cursor = self.db_cursor.execute(self.sql_already_processed.format(table_name=self.db_table_name), {
             'bucket_path': self.bucket_path,
             'aws_account_id': self.aws_account_id,
             'log_key': downloaded_file})
@@ -2208,7 +2191,7 @@ class AWSCustomBucket(AWSBucket):
         :type aws_account_id: str
         :rtype: int
         """
-        query_count_custom = self.db_connector.execute(
+        query_count_custom = self.db_cursor.execute(
             self.sql_count_custom.format(table_name=self.db_table_name), {
                 'bucket_path': self.bucket_path,
                 'aws_account_id':  aws_account_id if aws_account_id else self.aws_account_id,
@@ -2220,7 +2203,7 @@ class AWSCustomBucket(AWSBucket):
         debug("+++ DB Maintenance", 1)
         try:
             if self.db_count_custom(aws_account_id) > self.retain_db_records:
-                self.db_connector.execute(self.sql_db_maintenance.format(table_name=self.db_table_name), {
+                self.db_cursor.execute(self.sql_db_maintenance.format(table_name=self.db_table_name), {
                     'bucket_path': self.bucket_path,
                     'aws_account_id':  aws_account_id if aws_account_id else self.aws_account_id,
                     'retain_db_records': self.retain_db_records})
