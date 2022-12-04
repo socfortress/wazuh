@@ -1,0 +1,16 @@
+{
+  "anyOf": [
+    {
+      "$ref": "custom-ecs-field.json#"
+    },
+    {
+      "$ref": "suricata-fields.json"
+    },
+    {
+      "$ref": "apache-fields.json"
+    },
+    {
+      "$ref": "cisco-fields.json"
+    }
+  ]
+}

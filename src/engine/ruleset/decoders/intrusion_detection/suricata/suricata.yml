@@ -1,0 +1,67 @@
+name: decoder/suricata/0
+
+sources:
+  - decoder/json/0
+
+metadata:
+  module: suricata
+  compatibility: <= v7
+  author:
+    name: Wazuh Inc, info@wazuh.com
+    date: Nov 18 2022
+  references:
+    - https://suricata.readthedocs.io/en/suricata-6.0.8/output/eve/eve-json-format.html?highlight=eve%20format
+  title: Suricata decoder
+  description: Decoder for Suricata solution
+
+definitions:
+  is_good_appProto: +s_ne/suricata.eve.app_proto/failed AND +s_ne/suricata.eve.app_proto/template AND +s_ne/suricata.eve.app_proto/template-rust
+
+check:
+  - ~json.event_type: +ef_exists
+
+normalize:
+  - map:
+      - suricata.eve: $~json
+      - ~json: +ef_delete
+      - event.module: suricata
+      - event.kind: event
+      - event.category: +a_append/network
+      - event.created: $suricata.eve.timestamp
+      - source.address: $suricata.eve.src_ip
+      - source.ip: $suricata.eve.src_ip
+      - source.port: $suricata.eve.src_port
+      - destination.address: $suricata.eve.dest_ip
+      - destination.ip: $destination.address
+      - destination.port: $suricata.eve.dest_port
+      - network.transport: $suricata.eve.proto
+
+  - map:
+      - suricata.eve.app_proto: +s_lo/$suricata.eve.app_proto
+
+  - check: $is_good_appProto
+    map:
+      - network.protocol: $suricata.eve.app_proto
+
+  - check:
+      - suricata.eve.app_proto: +s_eq/ftp-data
+    map:
+      - network.protocol: ftp
+
+      - suricata.eve.event_type: +s_lo/$suricata.eve.event_type
+      - suricata.eve.netwrok.transport: +s_lo/$suricata.eve.network.transport
+      - suricata.eve.proto: +s_lo/$suricata.eve.proto
+
+      - destination.bytes: $suricata.eve.flow.bytes_toclient
+      - destination.mac: $suricata.eve.ether.dest_mac
+      - destination.packets: $suricata.eve.flow.pkts_toclient
+      - source.bytes: $suricata.eve.flow.bytes_toserver
+      - source.mac: $suricata.eve.ether.src_mac
+      - source.packets: $suricata.eve.flow.pkts_toserver
+      - event.start: $suricata.eve.flow.start
+      - event.end: $suricata.eve.flow.end
+
+  - check:
+      - suricata.eve.flow.state: +s_eq/new
+    map:
+      - event.type: +a_append/end
