@@ -5,7 +5,7 @@ sources:
 
 metadata:
   module: cisco
-  compatibility: <= v7
+  compatibility: cisco version.
   author:
     name: Wazuh Inc, info@wazuh.com
     date: "2022"
@@ -15,22 +15,22 @@ metadata:
   description: Decoder for common fields of Cisco Family products.
 
 definitions:
-  cisco: <~cisco.prefix>-<~cisco.sufix>-<event.severity>-%<cisco.message_id> <~local.message>
-  cisco2: <~cisco.prefix>-<event.severity>-%<cisco.message_id> <~local.message>
+  cisco-sufix: "%<~cisco.prefix>-<~cisco.sufix>-<event.severity>-<~cisco.message_id>: <~cisco.message>"
+  cisco-base: "%<~cisco.prefix>-<event.severity>-<~cisco.message_id>: <~cisco.message>"
 
 check:
-  - message: $cisco OR cisco2
+  - message: "+r_match/^%\\S+-\\d-\\d+:"
 
 parse:
   logpar:
-    - message: $cisco1
-    - message: $cisco2
+    - message: $cisco-sufix
+    - message: $cisco-base
 
 normalize:
   - map:
       - event.module: cisco
-      - event.code: $cisco.message_id
-
+      - event.code: $~cisco.message_id
+      - cisco.asa.message_id: $~cisco.message_id
   # set default severity if there is none yet
   - check:
       - event.severity: +t_is_null
