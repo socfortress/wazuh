@@ -43,6 +43,9 @@ CREDENTIALS_URL = 'https://documentation.wazuh.com/current/amazon/services/prere
 DEPRECATED_MESSAGE = 'The {name} authentication parameter was deprecated in {release}. ' \
                      'Please use another authentication method instead. Check {url} for more information.'
 
+ALL_REGIONS = ['us-east-1', 'us-east-2', 'us-west-1', 'us-west-2', 'ap-northeast-1', 'ap-northeast-2',
+               'ap-southeast-2', 'ap-south-1', 'eu-central-1', 'eu-west-1']
+
 # Enable/disable debug mode
 debug_level = 0
 
@@ -60,7 +63,7 @@ def debug(msg, msg_level):
 def arg_valid_date(arg_string):
     try:
         parsed_date = datetime.strptime(arg_string, "%Y-%b-%d")
-        # Return int created from date in YYYYMMDD format
+        # Return str created from date in YYYYMMDD format
         return parsed_date.strftime('%Y%m%d')
     except ValueError:
         raise argparse.ArgumentTypeError("Argument not a valid date in format YYYY-MMM-DD: '{0}'.".format(arg_string))
@@ -77,7 +80,7 @@ def arg_valid_accountid(arg_string):
         return []
     account_ids = arg_string.split(',')
     for account in account_ids:
-        if not account.strip().isdigit() and len(account) != 12:
+        if not account.strip().isdigit() or len(account) != 12:
             raise argparse.ArgumentTypeError(
                 "Not valid AWS account ID (numeric digits only): '{0}'.".format(arg_string))
 
@@ -218,7 +221,7 @@ def main(argv):
             if options.type.lower() == 'cloudtrail':
                 bucket_type = buckets_s3.cloudtrail.AWSCloudTrailBucket
             elif options.type.lower() == 'vpcflow':
-                bucket_type = buckets_s3.config.AWSVPCFlowBucket
+                bucket_type = buckets_s3.vpcflow.AWSVPCFlowBucket
             elif options.type.lower() == 'config':
                 bucket_type = buckets_s3.config.AWSConfigBucket
             elif options.type.lower() == 'custom':
@@ -278,9 +281,7 @@ def main(argv):
                     options.regions.append(aws_config.get(aws_profile, "region"))
                 else:
                     debug("+++ Warning: No regions were specified, trying to get events from all regions", 1)
-                    options.regions = ['us-east-1', 'us-east-2', 'us-west-1', 'us-west-2',
-                                       'ap-northeast-1', 'ap-northeast-2', 'ap-southeast-2', 'ap-south-1',
-                                       'eu-central-1', 'eu-west-1']
+                    options.regions = ALL_REGIONS
 
             for region in options.regions:
                 debug('+++ Getting alerts from "{}" region.'.format(region), 1)
