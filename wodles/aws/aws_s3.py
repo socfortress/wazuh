@@ -244,7 +244,7 @@ def main(argv):
                 raise Exception("Invalid type of bucket")
             bucket = bucket_type(reparse=options.reparse, access_key=options.access_key,
                                  secret_key=options.secret_key,
-                                 profile=options.aws_profile,
+                                 aws_profile=options.aws_profile,
                                  iam_role_arn=options.iam_role_arn,
                                  bucket=options.logBucket,
                                  only_logs_after=options.only_logs_after,
