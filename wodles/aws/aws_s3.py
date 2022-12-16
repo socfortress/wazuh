@@ -41,7 +41,6 @@ def main(argv):
     options = tools.get_script_arguments()
 
     if int(options.debug) > 0:
-        global debug_level
         tools.debug_level = int(options.debug)
         tools.debug('+++ Debug mode on - Level: {debug}'.format(debug=options.debug), 1)
 
@@ -147,6 +146,6 @@ if __name__ == '__main__':
         sys.exit(0)
     except Exception as e:
         print("Unknown error: {}".format(e))
-        if debug_level > 0:
+        if tools.debug_level > 0:
             raise
         sys.exit(1)
